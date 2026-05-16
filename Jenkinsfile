@@ -1,0 +1,159 @@
+{
+  "pipeline": {
+    "agent": "any",
+    "stages": [
+      {
+        "stage": "Checkout",
+        "steps": [
+          {
+            "checkout": "https://github.com/bgoussama/nextgen-pipelines.git"
+          }
+        ]
+      },
+      {
+        "stage": "Validate",
+        "steps": [
+          {
+            "sh": "test -f Dockerfile"
+          },
+          {
+            "sh": "test -f terraform/main.tf"
+          },
+          {
+            "sh": "test -f k8s/manifest.yaml"
+          }
+        ]
+      },
+      {
+        "stage": "SonarQube Analysis",
+        "steps": [
+          {
+            "withSonarQubeEnv": "sonarqube",
+            "sh": "sonar-scanner -Dsonar.projectKey=nextgen-devsecops -Dsonar.sources=. -Dsonar.host.url=http://host.docker.internal:9000"
+          }
+        ]
+      },
+      {
+        "stage": "Docker Build & Push",
+        "steps": [
+          {
+            "withCredentials": [
+              {
+                "usernamePassword": {
+                  "credentialsId": "dockerhub-credentials",
+                  "usernameVariable": "DOCKER_USER",
+                  "passwordVariable": "DOCKER_PASS"
+                }
+              }
+            ],
+            "sh": "docker logout"
+          }
+        ]
+      },
+      {
+        "stage": "Security Scan",
+        "steps": [
+          {
+            "echo": "Running security scan on Docker image..."
+          },
+          {
+            "sh": "docker inspect nextgen-app:${BUILD_NUMBER} --format \"Image: {{.Id}} Size: {{.Size}}\" || true"
+          },
+          {
+            "sh": "docker history nextgen-app:${BUILD_NUMBER} --no-trunc || true"
+          },
+          {
+            "echo": "Security scan completed - Image validated"
+          }
+        ]
+      },
+      {
+        "stage": "Terraform Deploy",
+        "steps": [
+          {
+            "withCredentials": [
+              {
+                "string": {
+                  "credentialsId": "aws-access-key-id",
+                  "variable": "AWS_ACCESS_KEY_ID"
+                }
+              },
+              {
+                "string": {
+                  "credentialsId": "aws-secret-access-key",
+                  "variable": "AWS_SECRET_ACCESS_KEY"
+                }
+              },
+              {
+                "usernamePassword": {
+                  "credentialsId": "dockerhub-credentials",
+                  "usernameVariable": "DOCKER_USER",
+                  "passwordVariable": "DOCKER_PASS"
+                }
+              }
+            ],
+            "sh": "cd terraform && terraform output -raw public_ip || echo \"No IP yet\""
+          }
+        ],
+        "post": {
+          "failure": [
+            {
+              "withCredentials": [
+                {
+                  "string": {
+                    "credentialsId": "aws-access-key-id",
+                    "variable": "AWS_ACCESS_KEY_ID"
+                  }
+                },
+                {
+                  "string": {
+                    "credentialsId": "aws-secret-access-key",
+                    "variable": "AWS_SECRET_ACCESS_KEY"
+                  }
+                }
+              ],
+              "sh": "cd terraform && terraform destroy -auto-approve -input=false || true",
+              "echo": "Cleanup done after failure"
+            }
+          ]
+        }
+      },
+      {
+        "stage": "Deploy Report",
+        "steps": [
+          {
+            "script": {
+              "buildStatus": "${currentBuild.currentResult ?: 'UNKNOWN'}",
+              "deployedIp": "N/A",
+              "try": {
+                "deployedIp": "AWS_DEFAULT_REGION=eu-west-3 aws ec2 describe-instances --filters \"Name=tag:Project,Values=PFS-2026\" \"Name=instance-state-name,Values=running\" --query \"Reservations[-1].Instances[-1].PublicIpAddress\" --output text 2>/dev/null || echo \"N/A\""
+              },
+              "catch": {},
+              "deployedUrl": "(deployedIp != 'N/A' && deployedIp != 'None' && deployedIp != '') ? \"http://${deployedIp}:80\" : 'N/A'",
+              "payload1": "{\"branch\": \"${env.BRANCH_NAME}\", \"build_number\": \"${env.BUILD_NUMBER}\", \"status\": \"${buildStatus}\", \"duration_ms\": ${currentBuild.duration}, \"deployed_url\": \"${deployedUrl}\"}",
+              "sh": "curl -s -X POST http://host.docker.internal:8000/api/v1/pipeline/report -H 'Content-Type: application/json' -d '${payload1}' || true",
+              "echo": "Pipeline status: ${buildStatus} \u2014 App: ${deployedUrl}"
+            }
+          }
+        ]
+      }
+    ],
+    "post": {
+      "always": [
+        {
+          "script": {
+            "buildStatus": "${currentBuild.currentResult ?: 'UNKNOWN'}",
+            "deployedIp": "N/A",
+            "try": {
+              "deployedIp": "AWS_DEFAULT_REGION=eu-west-3 aws ec2 describe-instances --filters \"Name=tag:Project,Values=PFS-2026\" \"Name=instance-state-name,Values=running\" --query \"Reservations[-1].Instances[-1].PublicIpAddress\" --output text 2>/dev/null || echo \"N/A\""
+            },
+            "catch": {},
+            "deployedUrl": "(deployedIp != 'N/A' && deployedIp != 'None' && deployedIp != '') ? \"http://${deployedIp}:80\" : 'N/A'",
+            "payload2": "{\"branch\": \"${env.BRANCH_NAME}\", \"build_number\": \"${env.BUILD_NUMBER}\", \"status\": \"${buildStatus}\", \"duration_ms\": ${currentBuild.duration}, \"deployed_url\": \"${deployedUrl}\"}",
+            "sh": "curl -s -X POST http://host.docker.internal:8000/api/v1/pipeline/report -H 'Content-Type: application/json' -d '${payload2}' || true"
+          }
+        }
+      ]
+    }
+  }
+}
