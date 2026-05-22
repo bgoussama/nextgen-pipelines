@@ -1,0 +1,1 @@
+FROM python:3.10-slim RUN pip install --upgrade pip RUN pip install django pytest-django coverage bandit COPY . /app WORKDIR /app RUN pytest --cov=app tests/ EXPOSE 80 CMD ["python", "manage.py", "runserver", "0.0.0.0:80"]
